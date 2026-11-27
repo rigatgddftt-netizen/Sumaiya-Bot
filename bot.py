@@ -2,7 +2,7 @@ import os
 import logging
 import requests
 import yt_dlp
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 # ==========================================
@@ -13,28 +13,26 @@ TOKEN = "9029968342:AAG-XRHnHFhkbW7bxiZbegqYb3rWuYxNMh4"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # ==========================================
-# 2. START COMMAND (Premium & Stylish UI)
+# 2. START COMMAND
 # ==========================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
     
-    # Premium Styled Inline Buttons
     keyboard = [
-        [InlineKeyboardButton("✨ 𝗖𝗛𝗔𝗧 𝗪𝗜𝗧𝗛 𝗔𝗜 ✨", callback_data='ai_chat')],
-        [InlineKeyboardButton("🎬 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗 𝗩𝗜𝗗𝗘𝗢 🎬", callback_data='video_dl')],
-        [InlineKeyboardButton("🚀 𝗝𝗢𝗜𝗡 𝗢𝗨𝗥 𝗖𝗛𝗔𝗡𝗡𝗘𝗟 🚀", url='https://t.me/auraffxofficial')]
+        [InlineKeyboardButton("✨ CHAT WITH AI ✨", callback_data='ai_chat')],
+        [InlineKeyboardButton("🎬 DOWNLOAD VIDEO 🎬", callback_data='video_dl')],
+        [InlineKeyboardButton("🚀 JOIN OUR CHANNEL 🚀", url='https://t.me/auraffxofficial')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # Stylish Welcome Message with Markdown
     welcome_text = (
         "╔══════════════════════╗\n"
         "   🌌 **DREAM AI BOT** 🌌\n"
         "╚══════════════════════╝\n\n"
         f"👋 Hello **{user_name}**,\n"
-        "Welcome to the ultimate AI experience. I am designed to assist you with smart answers and instant video downloads.\n\n"
+        "Welcome to the ultimate AI experience. I can understand and reply in any language (Bangla, English, Hindi, etc.).\n\n"
         "🛠 **Available Features:**\n"
-        "➔ 🤖 **AI Assistant:** Ask me anything.\n"
+        "➔ 🤖 **AI Assistant:** Ask me anything in any language.\n"
         "➔ ⬇️ **Video Downloader:** Paste any video link.\n\n"
         "👇 **Tap a button below to begin:**"
     )
@@ -50,7 +48,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == 'ai_chat':
         await query.edit_message_text(
-            text="💠 **AI MODE ACTIVATED**\n\nSend me any question or prompt, and I will generate a smart response for you.", 
+            text="💠 **AI MODE ACTIVATED**\n\nSend me any question in any language (Bangla, English, etc.), and I will reply in the same language.", 
             parse_mode='Markdown'
         )
     elif query.data == 'video_dl':
@@ -94,17 +92,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("❌ **Error:** I couldn't download this link. Please make sure the link is public and valid.")
             print(f"Download error: {e}")
             
-    # AI CHAT
+    # AI CHAT (HuggingFace API)
     else:
         status_msg = await update.message.reply_text("🧠 **AI is thinking...**")
         
         try:
-            prompt = f"You are a highly intelligent, friendly AI. Answer this clearly in English: {text}"
-            encoded_prompt = requests.utils.quote(prompt)
-            response = requests.get(f"https://text.pollinations.ai/{encoded_prompt}")
+            # এখানে এআই-কে বলা হয়েছে ব্যবহারকারীর ভাষাতেই উত্তর দিতে
+            API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+            headers = {"Authorization": "Bearer hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+            
+            # প্রম্পট তৈরি
+            prompt_text = f"<s>[INST] You are a smart AI. You must reply in the SAME language the user speaks. If the user speaks Bengali, reply in Bengali. If English, reply in English. User asks: {text} [/INST]"
+            payload = {"inputs": prompt_text}
+            
+            response = requests.post(API_URL, headers=headers, json=payload, timeout=15)
             
             if response.status_code == 200:
-                ai_reply = response.text
+                ai_reply = response.json()[0]['generated_text']
+                
+                # প্রম্পটের অতিরিক্ত অংশ মুছে ফেলা
+                if "[/INST]" in ai_reply:
+                    ai_reply = ai_reply.split("[/INST]")[-1].strip()
+                
                 formatted_reply = (
                     "╔══════════════════════╗\n"
                     "   🤖 **AI RESPONSE**\n"
@@ -122,7 +131,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(f"AI error: {e}")
 
 # ==========================================
-# 5. RUN THE BOT
+# 5. SET BOT COMMANDS (For Side Menu)
+# ==========================================
+async def set_commands(application):
+    commands = [
+        BotCommand("start", "Start the bot"),
+        BotCommand("video", "Mode: Download Video"),
+        BotCommand("chat", "Mode: Chat with AI")
+    ]
+    await application.bot.set_my_commands(commands)
+
+# ==========================================
+# 6. RUN THE BOT
 # ==========================================
 if __name__ == '__main__':
     print("Starting Dream AI Bot...")
@@ -131,6 +151,8 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_click))
+    
+    application.post_init = set_commands
     
     print("Bot is online and running!")
     application.run_polling()
