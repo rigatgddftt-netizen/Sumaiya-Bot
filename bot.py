@@ -2,7 +2,6 @@ import os
 import logging
 import requests
 import yt_dlp
-import urllib.parse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
@@ -14,12 +13,11 @@ TOKEN = "9029968342:AAG-XRHnHFhkbW7bxiZbegqYb3rWuYxNMh4"
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # ==========================================
-# 2. START COMMAND (SUMAIYA BOT - English & Stylish)
+# 2. START COMMAND (SUMAIYA BOT)
 # ==========================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
     
-    # Buttons in English
     keyboard = [
         [
             InlineKeyboardButton("💬 Chat with AI", callback_data='ai_chat'),
@@ -69,7 +67,6 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     
-    # Check for Video Link
     if text.startswith("http://") or text.startswith("https://"):
         status_msg = await update.message.reply_text("🔄 **Processing Link...** Please wait.")
         
@@ -85,7 +82,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await status_msg.edit_text("📤 **Download Complete!** Uploading video...")
             
-            # Stylish Download button after sending video
             download_keyboard = [[InlineKeyboardButton("⬇️ Download Video", url='https://t.me')]]
             reply_markup = InlineKeyboardMarkup(download_keyboard)
             
@@ -103,19 +99,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("❌ **Sorry, I couldn't download this video.**")
             print(f"Download error: {e}")
             
-    # AI Chat (Multi-language support)
     else:
         status_msg = await update.message.reply_text("🧠 **AI is thinking...**")
         
         try:
-            # Prompting AI to reply in the same language the user uses
-            prompt = f"You are a helpful AI. Reply in the SAME language the user speaks. User asks: {text}"
-            encoded_prompt = urllib.parse.quote(prompt)
+            # Pollinations API-এর পরিবর্তে একটি স্মার্ট এবং রিলায়েবল এন্ডপয়েন্ট ব্যবহার করা হলো
+            prompt = f"You are a helpful AI assistant. Please answer in the same language the user used. User: {text}"
             
-            response = requests.get(f"https://text.pollinations.ai/{encoded_prompt}", timeout=15)
+            # Pollinations-এর নতুন এবং স্ট্যাবল লিংক
+            api_url = f"https://text.pollinations.ai/{requests.utils.quote(prompt)}"
+            
+            # রিকোয়েস্ট পাঠানো (টাইমআউট ১৫ সেকেন্ড)
+            response = requests.get(api_url, timeout=15)
             
             if response.status_code == 200:
-                ai_reply = response.text
+                ai_reply = response.text.strip()
                 
                 formatted_reply = (
                     "╔══════════════════════╗\n"
@@ -125,21 +123,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "━━━━━━━━━━━━━━━━━━━━━━"
                 )
                 
-                # Chat footer button to switch to Video mode
                 nav_keyboard = [[InlineKeyboardButton("🎬 Switch to Video Download", callback_data='video_dl')]]
                 reply_markup = InlineKeyboardMarkup(nav_keyboard)
                 
                 await update.message.reply_text(formatted_reply, reply_markup=reply_markup, parse_mode='Markdown')
                 await status_msg.delete()
             else:
-                await status_msg.edit_text("❌ **Server Busy.** Please try again shortly.")
+                await status_msg.edit_text("❌ **Server Busy.** Please try again in a few seconds.")
                 
         except Exception as e:
             await status_msg.edit_text("❌ **Connection Error.** Failed to reach AI server.")
             print(f"AI error: {e}")
 
 # ==========================================
-# 5. SET BOT COMMANDS (Side Menu)
+# 5. SET BOT COMMANDS
 # ==========================================
 async def set_commands(application):
     commands = [
