@@ -18,8 +18,7 @@ import yt_dlp
 # ==========================================
 # 1. BOT TOKEN & LOGGING
 # ==========================================
-TOKEN = os.getenv("9029968342:AAFkSeQ6wyFHVby9kBEgIyFInVSCmlfNf-8
-")
+TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable set করুন! (BotFather থেকে নতুন টোকেন নিন)")
 
