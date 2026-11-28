@@ -34,10 +34,8 @@ MAX_TELEGRAM_MSG_LEN = 3800
 def _split_text(text: str, limit: int = MAX_TELEGRAM_MSG_LEN) -> list[str]:
     if len(text) <= limit:
         return [text]
-
     chunks: list[str] = []
     current = ""
-
     for line in text.split("\n"):
         if len(line) > limit:
             if current:
@@ -53,7 +51,6 @@ def _split_text(text: str, limit: int = MAX_TELEGRAM_MSG_LEN) -> list[str]:
                 chunks.append(line[start:end].strip())
                 start = end
             continue
-
         candidate = f"{current}\n{line}" if current else line
         if len(candidate) > limit:
             if current:
@@ -61,10 +58,8 @@ def _split_text(text: str, limit: int = MAX_TELEGRAM_MSG_LEN) -> list[str]:
             current = line
         else:
             current = candidate
-
     if current:
         chunks.append(current)
-
     return chunks
 
 
@@ -83,52 +78,35 @@ def _download_video_sync(url: str, output_template: str) -> None:
         ydl.download([url])
 
 
-def _ask_pollinations_post(prompt: str) -> str:
-    url = "https://text.pollinations.ai/"
-    payload = {
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a helpful AI assistant. Always reply clearly in the same language the user uses.",
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "model": "openai",
-    }
-    resp = requests.post(url, json=payload, timeout=15)
-    resp.raise_for_status()
-    return resp.text.strip()
-
-
-def _ask_pollinations_get(prompt: str) -> str:
-    url = f"https://text.pollinations.ai/{requests.utils.quote(prompt)}"
-    resp = requests.get(url, timeout=12)
-    resp.raise_for_status()
-    return resp.text.strip()
-
-
-def _ask_popcat_fallback(prompt: str) -> str:
-    url = (
-        f"https://api.popcat.xyz/v2/chatbot"
-        f"?msg={requests.utils.quote(prompt)}&owner=Sumaiya&botname=Sumaiya%20Bot"
-    )
-    resp = requests.get(url, timeout=12)
+# নতুন এন্ডপয়েন্ট: DuckDuckGo AI (সম্পূর্ণ ফ্রি)
+def _ask_duckduckgo(prompt: str) -> str:
+    url = "https://api.duckduckgo.com/"
+    params = {"q": prompt, "format": "json", "no_html": 1, "skip_disambig": 1}
+    resp = requests.get(url, params=params, timeout=15)
     resp.raise_for_status()
     data = resp.json()
-    reply = ""
-    if isinstance(data, dict):
-        if isinstance(data.get("message"), dict):
-            reply = data["message"].get("reply", "")
-        else:
-            reply = data.get("reply") or data.get("response") or ""
-    return str(reply).strip()
+    answer = data.get("AbstractText", "")
+    if answer:
+        return answer
+    # ফলব্যাক: DuckDuckGo চ্যাট
+    url2 = "https://quack.duckduckgo.com/api/chat"
+    payload = {"messages": [{"role": "user", "content": prompt}]}
+    resp2 = requests.post(url2, json=payload, timeout=15)
+    resp2.raise_for_status()
+    return resp2.json().get("message", "").strip()
+
+# ফলব্যাক হিসেবে Pollinations GET (যদি DDG ফেইল করে)
+def _ask_pollinations_get(prompt: str) -> str:
+    url = f"https://text.pollinations.ai/{requests.utils.quote(prompt)}"
+    resp = requests.get(url, timeout=15)
+    resp.raise_for_status()
+    return resp.text.strip()
 
 
 def _fetch_ai_sync(prompt: str) -> str:
     providers = [
-        ("Pollinations-POST", _ask_pollinations_post),
+        ("DuckDuckGo", _ask_duckduckgo),
         ("Pollinations-GET", _ask_pollinations_get),
-        ("Popcat-Fallback", _ask_popcat_fallback),
     ]
 
     last_error = None
@@ -136,7 +114,7 @@ def _fetch_ai_sync(prompt: str) -> str:
         for attempt in range(2):
             try:
                 answer = fn(prompt)
-                if answer and len(answer) > 1 and not answer.lower().startswith("<!doctype html"):
+                if answer and len(answer) > 1:
                     return answer
                 break
             except Exception as exc:
@@ -154,10 +132,8 @@ def _fetch_ai_sync(prompt: str) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
-
     context.user_data.setdefault("mode", "ai_chat")
     user_name = update.effective_user.first_name if update.effective_user else "User"
-
     keyboard = [
         [
             InlineKeyboardButton("💬 Chat with AI", callback_data="ai_chat"),
@@ -165,7 +141,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     welcome_text = (
         "╔══════════════════════╗\n"
         "   ✨ SUMAIYA BOT ✨\n"
@@ -174,14 +149,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "I am a smart AI bot. You can chat with me in any language, or download any video instantly.\n\n"
         "👇 Tap a button below to begin:"
     )
-
     await update.message.reply_text(welcome_text, reply_markup=reply_markup)
 
 
 async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
-
     context.user_data["mode"] = "ai_chat"
     keyboard = [[InlineKeyboardButton("🎬 Switch to Video Download", callback_data="video_dl")]]
     await update.message.reply_text(
@@ -193,7 +166,6 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def video_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
-
     context.user_data["mode"] = "video_dl"
     keyboard = [[InlineKeyboardButton("💬 Switch to Chat", callback_data="ai_chat")]]
     await update.message.reply_text(
@@ -210,7 +182,6 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query:
         return
     await query.answer()
-
     if query.data == "ai_chat":
         context.user_data["mode"] = "ai_chat"
         keyboard = [[InlineKeyboardButton("🎬 Switch to Video Download", callback_data="video_dl")]]
@@ -233,7 +204,6 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
-
     text = update.message.text.strip()
     mode = context.user_data.get("mode", "ai_chat")
 
@@ -253,24 +223,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             await asyncio.to_thread(_download_video_sync, text, output_template)
-
             for fname in os.listdir("."):
                 if fname.startswith(f"video_{unique_id}."):
                     downloaded_file = fname
                     break
-
             if not downloaded_file or not os.path.exists(downloaded_file):
                 raise FileNotFoundError("Video file not created.")
-
             file_size = os.path.getsize(downloaded_file)
             if file_size > 49 * 1024 * 1024:
-                await status_msg.edit_text(
-                    "❌ ভিডিওটির সাইজ Telegram-এর আপলোড সীমার (৫০ MB) চেয়ে বড়।"
-                )
+                await status_msg.edit_text("❌ ভিডিওটির সাইজ Telegram-এর আপলোড সীমার (৫০ MB) চেয়ে বড়।")
                 return
-
             await status_msg.edit_text("📤 Download Complete! Uploading video...")
-
             nav_keyboard = [[InlineKeyboardButton("💬 Chat with AI", callback_data="ai_chat")]]
             with open(downloaded_file, "rb") as video_file:
                 await update.message.reply_video(
@@ -278,13 +241,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption="✨ Video Downloaded Successfully!\n\n🤖 Powered by Sumaiya Bot.",
                     reply_markup=InlineKeyboardMarkup(nav_keyboard),
                 )
-
         except Exception as e:
             logger.error("Download error: %s", e)
             try:
-                await status_msg.edit_text(
-                    "❌ Sorry, I couldn't download this video. Please check the link or try another one."
-                )
+                await status_msg.edit_text("❌ Sorry, I couldn't download this video. Please check the link or try another one.")
             except Exception:
                 pass
         finally:
@@ -300,18 +260,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     else:
         status_msg = await update.message.reply_text("🧠 AI is thinking...")
-
         try:
-            prompt = (
-                "You are a helpful AI assistant. Please answer in the same language "
-                f"the user used. User: {text}"
-            )
+            prompt = f"You are a helpful AI assistant. Please answer in the same language the user used. User: {text}"
             ai_reply = await asyncio.to_thread(_fetch_ai_sync, prompt)
             chunks = _split_text(ai_reply)
-
             nav_keyboard = [[InlineKeyboardButton("🎬 Switch to Video Download", callback_data="video_dl")]]
             reply_markup = InlineKeyboardMarkup(nav_keyboard)
-
             for idx, chunk in enumerate(chunks):
                 formatted_reply = (
                     "╔══════════════════════╗\n"
@@ -324,13 +278,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(formatted_reply, reply_markup=reply_markup)
                 else:
                     await update.message.reply_text(formatted_reply)
-
         except Exception as e:
             logger.error("AI error: %s", e)
             try:
-                await status_msg.edit_text(
-                    "❌ All AI servers are busy right now. Please try again in a few seconds."
-                )
+                await status_msg.edit_text("❌ All AI servers are busy right now. Please try again in a few seconds.")
             except Exception:
                 pass
         finally:
@@ -353,7 +304,7 @@ async def set_commands(application):
 
 
 # ==========================================
-# 7. RUN THE BOT
+# 7. RUN THE BOT (WEBHOOK FOR RENDER)
 # ==========================================
 if __name__ == "__main__":
     print("Starting Sumaiya Bot...")
@@ -370,5 +321,18 @@ if __name__ == "__main__":
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_click))
 
-    print("Sumaiya Bot is online and running!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Render-এর জন্য Webhook সেটআপ
+    PORT = int(os.environ.get("PORT", 8080))
+    RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+
+    if RENDER_EXTERNAL_URL:
+        print(f"Starting Webhook on {RENDER_EXTERNAL_URL}")
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=f"{RENDER_EXTERNAL_URL}/{TOKEN}",
+        )
+    else:
+        print("RENDER_EXTERNAL_URL not found. Falling back to Polling (Local testing).")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
