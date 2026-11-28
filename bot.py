@@ -1,253 +1,363 @@
 import os
 import time
+import uuid
+import asyncio
 import logging
 import requests
-import yt_dlp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    filters, ContextTypes, CallbackQueryHandler
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
 )
+import yt_dlp
 
 # ==========================================
-# 1. টোকেন (পরিবেশ ভেরিয়েবল থেকে পড়ার পরামর্শ দেওয়া হয়)
+# 1. BOT TOKEN & LOGGING
 # ==========================================
-TOKEN = os.getenv("BOT_TOKEN", "9029968342:AAG-XRHnHFhkbW7bxiZbegqYb3rWuYxNMh4")
+TOKEN = os.getenv("9029968342:AAFkSeQ6wyFHVby9kBEgIyFInVSCmlfNf-8
+")
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable set করুন! (BotFather থেকে নতুন টোকেন নিন)")
 
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
+MAX_TELEGRAM_MSG_LEN = 3800
+
+
+def _split_text(text: str, limit: int = MAX_TELEGRAM_MSG_LEN) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    current = ""
+
+    for line in text.split("\n"):
+        if len(line) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            start = 0
+            while start < len(line):
+                end = min(start + limit, len(line))
+                if end < len(line):
+                    space_idx = line.rfind(" ", start, end)
+                    if space_idx > start:
+                        end = space_idx
+                chunks.append(line[start:end].strip())
+                start = end
+            continue
+
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current = candidate
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
 # ==========================================
-# 2. START কমান্ড
+# 2. SYNC WORKERS (RUN IN THREADS)
+# ==========================================
+def _download_video_sync(url: str, output_template: str) -> None:
+    ydl_opts = {
+        "format": "best[filesize<48M][ext=mp4]/best[ext=mp4]/best[filesize<48M]/best",
+        "outtmpl": output_template,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+
+def _ask_pollinations_post(prompt: str) -> str:
+    url = "https://text.pollinations.ai/"
+    payload = {
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a helpful AI assistant. Always reply clearly in the same language the user uses.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "model": "openai",
+    }
+    resp = requests.post(url, json=payload, timeout=15)
+    resp.raise_for_status()
+    return resp.text.strip()
+
+
+def _ask_pollinations_get(prompt: str) -> str:
+    url = f"https://text.pollinations.ai/{requests.utils.quote(prompt)}"
+    resp = requests.get(url, timeout=12)
+    resp.raise_for_status()
+    return resp.text.strip()
+
+
+def _ask_popcat_fallback(prompt: str) -> str:
+    url = (
+        f"https://api.popcat.xyz/v2/chatbot"
+        f"?msg={requests.utils.quote(prompt)}&owner=Sumaiya&botname=Sumaiya%20Bot"
+    )
+    resp = requests.get(url, timeout=12)
+    resp.raise_for_status()
+    data = resp.json()
+    reply = ""
+    if isinstance(data, dict):
+        if isinstance(data.get("message"), dict):
+            reply = data["message"].get("reply", "")
+        else:
+            reply = data.get("reply") or data.get("response") or ""
+    return str(reply).strip()
+
+
+def _fetch_ai_sync(prompt: str) -> str:
+    providers = [
+        ("Pollinations-POST", _ask_pollinations_post),
+        ("Pollinations-GET", _ask_pollinations_get),
+        ("Popcat-Fallback", _ask_popcat_fallback),
+    ]
+
+    last_error = None
+    for name, fn in providers:
+        for attempt in range(2):
+            try:
+                answer = fn(prompt)
+                if answer and len(answer) > 1 and not answer.lower().startswith("<!doctype html"):
+                    return answer
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning("%s attempt %d failed: %s", name, attempt + 1, exc)
+                if attempt == 0:
+                    time.sleep(1.0)
+
+    raise RuntimeError(f"All AI providers failed: {last_error}")
+
+
+# ==========================================
+# 3. COMMANDS (/start, /chat, /video)
 # ==========================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_name = update.effective_user.first_name
+    if not update.message:
+        return
+
+    context.user_data.setdefault("mode", "ai_chat")
+    user_name = update.effective_user.first_name if update.effective_user else "User"
 
     keyboard = [
         [
-            InlineKeyboardButton("💬 AI-এর সাথে চ্যাট", callback_data='ai_chat'),
-            InlineKeyboardButton("🎬 ভিডিও ডাউনলোড", callback_data='video_dl')
+            InlineKeyboardButton("💬 Chat with AI", callback_data="ai_chat"),
+            InlineKeyboardButton("🎬 Video Downloader", callback_data="video_dl"),
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     welcome_text = (
         "╔══════════════════════╗\n"
-        "   ✨ **SUMAIYA BOT** ✨\n"
+        "   ✨ SUMAIYA BOT ✨\n"
         "╚══════════════════════╝\n\n"
-        f"👋 স্বাগতম **{user_name}**,\n"
-        "আমি একটি স্মার্ট AI বট। যেকোনো ভাষায় আমার সাথে চ্যাট করতে পারেন, অথবা যেকোনো ভিডিও লিংক পাঠিয়ে ডাউনলোড করতে পারেন।\n\n"
-        "👇 **শুরু করতে নিচের বাটনে ক্লিক করুন:**"
+        f"👋 Welcome {user_name},\n"
+        "I am a smart AI bot. You can chat with me in any language, or download any video instantly.\n\n"
+        "👇 Tap a button below to begin:"
     )
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
+
+    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+
+
+async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
+    context.user_data["mode"] = "ai_chat"
+    keyboard = [[InlineKeyboardButton("🎬 Switch to Video Download", callback_data="video_dl")]]
+    await update.message.reply_text(
+        "💠 AI CHAT MODE ACTIVATED!\n\nSend me any question in any language, and I will reply in the same language.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def video_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
+    context.user_data["mode"] = "video_dl"
+    keyboard = [[InlineKeyboardButton("💬 Switch to Chat", callback_data="ai_chat")]]
+    await update.message.reply_text(
+        "🎬 VIDEO DOWNLOADER MODE!\n\nPaste any video link (YouTube, Facebook, TikTok) and I will download it instantly.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
 # ==========================================
-# 3. বাটন ক্লিক হ্যান্ডলার (মোড সংরক্ষণ)
+# 4. BUTTON CLICK HANDLER
 # ==========================================
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not query:
+        return
     await query.answer()
 
-    if query.data == 'ai_chat':
-        context.user_data['mode'] = 'ai'
-        keyboard = [[InlineKeyboardButton("🎬 ভিডিও ডাউনলোডে যান", callback_data='video_dl')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+    if query.data == "ai_chat":
+        context.user_data["mode"] = "ai_chat"
+        keyboard = [[InlineKeyboardButton("🎬 Switch to Video Download", callback_data="video_dl")]]
         await query.edit_message_text(
-            text="💠 **AI চ্যাট মোড চালু হয়েছে!**\n\nযেকোনো ভাষায় প্রশ্ন পাঠান, আমি সেই ভাষাতেই উত্তর দেব।",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
+            text="💠 AI CHAT MODE ACTIVATED!\n\nSend me any question in any language, and I will reply in the same language.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
-    elif query.data == 'video_dl':
-        context.user_data['mode'] = 'video'
-        keyboard = [[InlineKeyboardButton("💬 চ্যাটে ফিরে যান", callback_data='ai_chat')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+    elif query.data == "video_dl":
+        context.user_data["mode"] = "video_dl"
+        keyboard = [[InlineKeyboardButton("💬 Switch to Chat", callback_data="ai_chat")]]
         await query.edit_message_text(
-            text="🎬 **ভিডিও ডাউনলোড মোড!**\n\nযেকোনো ভিডিও লিংক (YouTube, Facebook, TikTok) পেস্ট করুন, আমি ডাউনলোড করে পাঠিয়ে দেব।",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
+            text="🎬 VIDEO DOWNLOADER MODE!\n\nPaste any video link (YouTube, Facebook, TikTok) and I will download it instantly.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
 
 # ==========================================
-# 4. AI অনুরোধ (পুনরায় চেষ্টাসহ)
-# ==========================================
-def ask_ai(text: str, max_retries: int = 3) -> str:
-    """
-    Pollinations OpenAI-সামঞ্জস্যপূর্ণ ইন্টারফেস কল করুন, ব্যর্থ হলে পুনরায় চেষ্টা করুন।
-    সফল হলে AI উত্তর স্ট্রিং রিটার্ন করে; সব ব্যর্থ হলে None রিটার্ন করে।
-    """
-    url = "https://text.pollinations.ai/openai"
-    payload = {
-        "model": "openai",
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a helpful AI assistant. Always reply in the same language the user used."
-            },
-            {"role": "user", "content": text}
-        ]
-    }
-    headers = {"Content-Type": "application/json"}
-
-    for attempt in range(max_retries):
-        try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=25)
-            if resp.status_code == 200:
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"]
-                if content and content.strip():
-                    return content.strip()
-            logger.warning(f"AI অনুরোধ ব্যর্থ, স্ট্যাটাস কোড: {resp.status_code}, চেষ্টা: {attempt + 1}")
-        except Exception as e:
-            logger.warning(f"AI অনুরোধে ত্রুটি (চেষ্টা {attempt + 1}): {e}")
-
-        if attempt < max_retries - 1:
-            time.sleep(1.5)  # পুনরায় চেষ্টার আগে অপেক্ষা করুন
-
-    return None
-
-
-# ==========================================
-# 5. ভিডিও ডাউনলোড ফাংশন
-# ==========================================
-def download_video(url: str, user_id: int) -> str | None:
-    """
-    ভিডিও ডাউনলোড করুন, ফাইল পাথ রিটার্ন করুন; ব্যর্থ হলে None রিটার্ন করুন।
-    """
-    filename = f"video_{user_id}_{int(time.time())}.mp4"
-    ydl_opts = {
-        'format': 'best[ext=mp4]/best',
-        'outtmpl': filename,
-        'quiet': True,
-        'no_warnings': True,
-        'restrictfilenames': True,
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        return filename if os.path.exists(filename) else None
-    except Exception as e:
-        logger.error(f"ভিডিও ডাউনলোড ব্যর্থ: {e}")
-        return None
-
-
-# ==========================================
-# 6. মেসেজ হ্যান্ডলার
+# 5. MESSAGE HANDLER (AI & DOWNLOADER)
 # ==========================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if not text:
+    if not update.message or not update.message.text:
         return
 
-    mode = context.user_data.get('mode', 'ai')  # ডিফল্ট AI মোড
+    text = update.message.text.strip()
+    mode = context.user_data.get("mode", "ai_chat")
 
-    # ---------- ভিডিও মোড ----------
-    if mode == 'video' and (text.startswith("http://") or text.startswith("https://")):
-        status_msg = await update.message.reply_text("🔄 **লিংক প্রসেস হচ্ছে…** অনুগ্রহ করে অপেক্ষা করুন।")
-        file_path = None
+    if mode == "video_dl":
+        if not (text.startswith("http://") or text.startswith("https://")):
+            keyboard = [[InlineKeyboardButton("💬 Switch to Chat", callback_data="ai_chat")]]
+            await update.message.reply_text(
+                "🎬 আপনি এখন Video Downloader মোডে আছেন। অনুগ্রহ করে একটি বৈধ ভিডিও লিংক (http/https) পাঠান।",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        status_msg = await update.message.reply_text("🔄 Processing Link... Please wait.")
+        unique_id = uuid.uuid4().hex
+        output_template = f"video_{unique_id}.%(ext)s"
+        downloaded_file = None
+
         try:
-            file_path = download_video(text, update.effective_user.id)
-            if not file_path:
-                await status_msg.edit_text("❌ **দুঃখিত, এই ভিডিওটি ডাউনলোড করা যায়নি।** লিংকটি পরীক্ষা করুন বা পরে আবার চেষ্টা করুন।")
+            await asyncio.to_thread(_download_video_sync, text, output_template)
+
+            for fname in os.listdir("."):
+                if fname.startswith(f"video_{unique_id}."):
+                    downloaded_file = fname
+                    break
+
+            if not downloaded_file or not os.path.exists(downloaded_file):
+                raise FileNotFoundError("Video file not created.")
+
+            file_size = os.path.getsize(downloaded_file)
+            if file_size > 49 * 1024 * 1024:
+                await status_msg.edit_text(
+                    "❌ ভিডিওটির সাইজ Telegram-এর আপলোড সীমার (৫০ MB) চেয়ে বড়।"
+                )
                 return
 
-            await status_msg.edit_text("📤 **ডাউনলোড সম্পন্ন!** ভিডিও আপলোড হচ্ছে…")
-            with open(file_path, 'rb') as video_file:
+            await status_msg.edit_text("📤 Download Complete! Uploading video...")
+
+            nav_keyboard = [[InlineKeyboardButton("💬 Chat with AI", callback_data="ai_chat")]]
+            with open(downloaded_file, "rb") as video_file:
                 await update.message.reply_video(
                     video=video_file,
-                    caption="✨ **ভিডিও সফলভাবে ডাউনলোড হয়েছে!**\n\n🤖 Sumaiya Bot দ্বারা প্রস্তুতকৃত।"
+                    caption="✨ Video Downloaded Successfully!\n\n🤖 Powered by Sumaiya Bot.",
+                    reply_markup=InlineKeyboardMarkup(nav_keyboard),
                 )
-            await status_msg.delete()
-        except Exception as e:
-            logger.error(f"ভিডিও পাঠানোর সময় ত্রুটি: {e}")
-            try:
-                await status_msg.edit_text("❌ **ভিডিও পাঠাতে সমস্যা হয়েছে।**")
-            except:
-                pass
-        finally:
-            if file_path and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except:
-                    pass
 
-    # ---------- AI মোড ----------
-    else:
-        status_msg = await update.message.reply_text("🧠 **AI ভাবছে…**")
-        try:
-            ai_reply = ask_ai(text)
-            if ai_reply:
-                # সতর্কতামূলক: এখানে parse_mode='Markdown' ব্যবহার করা হয় না, টেলিগ্রাম পার্সিং ত্রুটি এড়াতে
-                formatted = (
-                    "╔══════════════════════╗\n"
-                    "   🤖 **AI উত্তর**\n"
-                    "╚══════════════════════╝\n\n"
-                    f"{ai_reply}\n\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━"
-                )
-                nav_keyboard = [[InlineKeyboardButton("🎬 ভিডিও ডাউনলোডে যান", callback_data='video_dl')]]
-                reply_markup = InlineKeyboardMarkup(nav_keyboard)
-                await update.message.reply_text(formatted, reply_markup=reply_markup)
-            else:
-                await status_msg.edit_text(
-                    "❌ **AI সার্ভার সাময়িকভাবে সাড়া দিচ্ছে না।**\n\n"
-                    "অনুগ্রহ করে **কয়েক সেকেন্ড পরে** আবার চেষ্টা করুন, অথবা প্রশ্নটি অন্যভাবে জিজ্ঞাসা করুন।"
-                )
         except Exception as e:
-            logger.error(f"AI হ্যান্ডলিং ত্রুটি: {e}")
+            logger.error("Download error: %s", e)
             try:
-                await status_msg.edit_text("❌ **একটি অপ্রত্যাশিত ত্রুটি ঘটেছে।** অনুগ্রহ করে পরে আবার চেষ্টা করুন।")
-            except:
+                await status_msg.edit_text(
+                    "❌ Sorry, I couldn't download this video. Please check the link or try another one."
+                )
+            except Exception:
                 pass
         finally:
-            # status_msg সফলভাবে reply_text দ্বারা প্রতিস্থাপিত হলে মুছে ফেলার চেষ্টা করুন (পার্থক্য না থাকলে বাদ দিন)
+            if downloaded_file and os.path.exists(downloaded_file):
+                try:
+                    os.remove(downloaded_file)
+                except OSError:
+                    pass
             try:
                 await status_msg.delete()
-            except:
+            except Exception:
+                pass
+
+    else:
+        status_msg = await update.message.reply_text("🧠 AI is thinking...")
+
+        try:
+            prompt = (
+                "You are a helpful AI assistant. Please answer in the same language "
+                f"the user used. User: {text}"
+            )
+            ai_reply = await asyncio.to_thread(_fetch_ai_sync, prompt)
+            chunks = _split_text(ai_reply)
+
+            nav_keyboard = [[InlineKeyboardButton("🎬 Switch to Video Download", callback_data="video_dl")]]
+            reply_markup = InlineKeyboardMarkup(nav_keyboard)
+
+            for idx, chunk in enumerate(chunks):
+                formatted_reply = (
+                    "╔══════════════════════╗\n"
+                    "   🤖 AI RESPONSE\n"
+                    "╚══════════════════════╝\n\n"
+                    f"{chunk}\n\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━"
+                )
+                if idx == len(chunks) - 1:
+                    await update.message.reply_text(formatted_reply, reply_markup=reply_markup)
+                else:
+                    await update.message.reply_text(formatted_reply)
+
+        except Exception as e:
+            logger.error("AI error: %s", e)
+            try:
+                await status_msg.edit_text(
+                    "❌ All AI servers are busy right now. Please try again in a few seconds."
+                )
+            except Exception:
+                pass
+        finally:
+            try:
+                await status_msg.delete()
+            except Exception:
                 pass
 
 
 # ==========================================
-# 7. কমান্ড হ্যান্ডলার
-# ==========================================
-async def cmd_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['mode'] = 'ai'
-    await update.message.reply_text("💠 **AI চ্যাট মোডে পরিবর্তিত হয়েছে।** যেকোনো প্রশ্ন পাঠান।")
-
-
-async def cmd_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['mode'] = 'video'
-    await update.message.reply_text("🎬 **ভিডিও ডাউনলোড মোডে পরিবর্তিত হয়েছে।** ভিডিও লিংক পাঠান।")
-
-
-# ==========================================
-# 8. গ্লোবাল ত্রুটি হ্যান্ডলার
-# ==========================================
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"আপডেট প্রসেস করার সময় ব্যতিক্রম: {context.error}", exc_info=context.error)
-
-
-# ==========================================
-# 9. কমান্ড সেট করুন
+# 6. SET BOT COMMANDS
 # ==========================================
 async def set_commands(application):
     commands = [
-        BotCommand("start", "বট শুরু করুন"),
-        BotCommand("chat", "AI চ্যাট মোড"),
-        BotCommand("video", "ভিডিও ডাউনলোড মোড")
+        BotCommand("start", "Start the bot"),
+        BotCommand("chat", "AI Chat Mode"),
+        BotCommand("video", "Video Download Mode"),
     ]
     await application.bot.set_my_commands(commands)
 
 
 # ==========================================
-# 10. চালান
+# 7. RUN THE BOT
 # ==========================================
-if __name__ == '__main__':
-    print("Sumaiya Bot চালু হচ্ছে…")
+if __name__ == "__main__":
+    print("Starting Sumaiya Bot...")
     application = (
         ApplicationBuilder()
         .token(TOKEN)
@@ -256,11 +366,10 @@ if __name__ == '__main__':
     )
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("chat", cmd_chat))
-    application.add_handler(CommandHandler("video", cmd_video))
+    application.add_handler(CommandHandler("chat", chat_command))
+    application.add_handler(CommandHandler("video", video_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_click))
-    application.add_error_handler(error_handler)
 
-    print("Sumaiya Bot অনলাইন এবং চলছে!")
-    application.run_polling()
+    print("Sumaiya Bot is online and running!")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
